@@ -1,15 +1,16 @@
 ---
 name: factory-score
-description: Score a repository against the "Software Factory" maturity rubric — measures how ready a repo is for AI-driven development. Produces both a 0–18 Score and a gated 0–3 Level (the two can disagree; level wins for agentic-readiness decisions). Use when triaging repos, prioritizing AI-readiness investment, or checking whether a codebase is amenable to autonomous agent workflows.
-version: 0.3.0-wip
+description: Score a repository against the "Software Factory" maturity rubric — measures how ready a repo is for AI-driven development. Produces both a 0–18 Score (with half-points) and a gated 0–3 Level (the two can disagree; level wins for agentic-readiness decisions). Use when triaging repos, prioritizing AI-readiness investment, or checking whether a codebase is amenable to autonomous agent workflows.
+version: 0.4.0-wip
 ---
 
 > ⚠️ **WORK IN PROGRESS — NOT YET VETTED**
 >
-> This skill is being iterated on actively. The rubric has gone through three revisions:
+> This skill is being iterated on actively. Rubric history:
 > - **v1** counted *presence* of artifacts (over-scored large monorepos)
 > - **v2** added coverage adjustment for scale + code-health + CI-speed modifiers
-> - **v3** (current) added **gated Levels** because the additive score doesn't capture agentic-readiness on its own — a repo can score 16/18 and still be Level 1 if the points are distributed wrong
+> - **v3** added **gated Levels** because the additive score doesn't capture agentic-readiness on its own — a repo can score 16/18 and still be Level 1 if the points are distributed wrong
+> - **v4** (current) added **half-point scores**, **parallel-subagent dispatch** for assessment, and a **formalized effort tiebreaker** for the recommended next move. Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
 >
 > Known limitations: infrastructure repos (Terraform, build-images), generated code, editor extensions, training content, and CI-only tooling all fit awkwardly into this rubric and may need separate variants. Branch-protection detection assumes GitHub rulesets and may underreport on classic protections. Some gates (especially G11, the auto-feedback loop) are hard to detect without runtime observation. Treat output as a starting point for conversation, not a final assessment.
 
@@ -21,7 +22,7 @@ A lightweight, mechanically checkable scorecard inspired by the [Building the So
 
 Scores a single repo on two dimensions:
 
-- **Score** — 0–18 across 6 categories (0–3 each), additive. Useful for "how much investment does this repo need."
+- **Score** — 0–18 across 6 categories (0–3 each, **half-points allowed**), additive. Useful for "how much investment does this repo need."
 - **Level** — 0/1/2/3, gated by specific capabilities. Answers "is this repo agentic-ready."
 
 When Score and Level disagree, **Level wins** for any agentic-readiness decision.
@@ -63,7 +64,35 @@ Output saved to `~/factory-score/<repo>-YYYY-MM-DD.md`.
 
 ---
 
-## Score: 6 categories × 0–3
+## Process (v4): parallel-subagent dispatch
+
+After Step 0, dispatch **6 parallel subagents** using the `Agent` tool with `subagent_type: "Explore"`. Each subagent scores one of the 6 categories independently.
+
+Each subagent returns:
+
+```
+Score: <0, 0.5, 1, 1.5, 2, 2.5, or 3>
+Evidence:
+- <bullet per existing item found>
+Gaps for next level:
+- <bullet per missing item>
+```
+
+Why parallel: cheaper on main-context tokens, faster wall-clock, and each subagent focuses narrowly on one category's signals.
+
+After collecting all 6 reports:
+1. Sum into a raw 0–18 score
+2. Apply Code Health modifier
+3. Evaluate gates in order (L0→L1 → L1→L2 → L2→L3); stop at first failing gate to determine Level
+4. Produce the scorecard + gap list + highest-leverage next move (ranked by effort tiebreaker)
+
+---
+
+## Score: 6 categories × 0–3 (half-points allowed)
+
+### Half-point rule
+
+A category scores X.5 when **most but not all** next-level criteria are met. Example: Context Engineering scores 2.5 if the repo has CLAUDE.md + ADRs + API spec (= Score 2) AND custom lint rules (= 1 of 2 Score-3 criteria) but is missing the per-module coverage gate.
 
 ### 1. Context Engineering
 
@@ -151,7 +180,7 @@ Output saved to `~/factory-score/<repo>-YYYY-MM-DD.md`.
 
 ## Level: gated by specific capabilities
 
-A repo's Level is **not** its score band. Each level has explicit gate capabilities. If any gate is missing, the repo is below that level — regardless of total score.
+A repo's Level is **not** its score band. Each level has explicit gate capabilities. If any gate is missing, the repo is below that level — regardless of total score. Half-point scores **do not change gate logic**; the gates are binary (met / not-met).
 
 ### Level 0 → Level 1 gate (Individual Productivity)
 
@@ -187,30 +216,63 @@ All 6 Level 2 gates PLUS all 5 below:
 
 ---
 
-## Process
+## Highest-leverage next move (with effort tiebreaker)
 
-1. Resolve the target repo (current dir, local path, or GitHub URL → clone to `/tmp/factory-score-<repo>`)
-2. Compute Repo Scale preamble (file count, size, modules, code health, CI duration)
-3. Run "How to check" commands for each category in parallel
-4. For each category: pick the highest level whose signals AND scale gate are satisfied — that's the Score
-5. Apply Code Health modifier to total
-6. Evaluate gates in order: L0→L1 → L1→L2 → L2→L3. Stop at first failed gate
-7. Output **Score · Level** with explicit list of which gates passed/failed
-8. Save the scorecard
+After the scorecard + gate analysis, recommend the **single highest-leverage next move** — the one that closes the next gate or completes a half-point.
+
+### Ranking algorithm
+
+1. **Category priority order** (matches the Software Factory phase progression):
+   Context Engineering > Guardrails > Feedback Loops > Agent Orchestration > Knowledge Persistence > CI/Workflow Integration
+
+2. **Within a category:** closing a failing **gate** (e.g., L1→L2 G6) takes priority over completing a half-point (e.g., 2 → 2.5 in score). Completing a whole-level advance (N → N+1) takes priority over completing a partial (N.5 → N+1).
+
+3. **Effort tiebreaker** at the same leverage tier:
+   - **Low** (<1 hour): config change, prompt edit, adding a single file (e.g., `claude-pr-review.yml`)
+   - **Medium** (1–4 hours): new project/script, moderate code addition (e.g., add `.claude/skills/` with 3 skills)
+   - **High** (>4 hours): cross-cutting infrastructure, multi-layer change (e.g., adopt mutation testing across a Rust workspace)
+
+   Prefer **lower-effort** gaps at the same leverage tier.
+
+### Output format for the recommendation
+
+```
+## Highest-Leverage Next Move
+
+**Gap:** <which gate or half-point this closes>
+**Category:** <name>
+**Current:** <score & level> → **Target:** <new score & level>
+**What to build:** <concrete files, config changes, or code needed>
+**Effort:** <Low / Medium / High>
+**Why this one:** <1 sentence: category priority + effort rationale>
+```
+
+---
+
+## Process (full sequence)
+
+1. **Resolve target repo** (current dir, local path, or GitHub URL → clone to `/tmp/factory-score-<repo>`)
+2. **Step 0:** Compute Repo Scale preamble (file count, size, modules, code health, CI duration)
+3. **Dispatch 6 parallel subagents** (one per category) with `Agent` tool, `subagent_type: "Explore"`. Each returns Score (0–3 with half-points) + Evidence + Gaps. Each subagent should exclude these paths: `node_modules`, `.git`, `target`, `dist`, `build`, `.next`, `.fastembed_cache`, `bin`, `obj`
+4. **Collect all 6 reports** and sum to raw total
+5. **Apply Code Health modifier**
+6. **Evaluate gates** in order (L0→L1 → L1→L2 → L2→L3); stop at first failed gate to determine Level
+7. **Rank gaps** by category priority + gate-over-half-point + effort tiebreaker
+8. **Output** the scorecard + level analysis + highest-leverage next move
 
 ## Output format
 
 Save to `~/factory-score/<repo>-YYYY-MM-DD.md`:
 
 - **Header:** repo name, commit SHA, date, Repo Scale preamble
-- **Score**: 6-category table (0–3 each, total /18)
+- **Score**: 6-category table (0–3 each with half-points, total /18)
 - **Level**: gated assessment with explicit gate-pass/fail table
 - **Why Level X (not X+1)**: the specific failing gate(s) — these are the agentic-readiness gaps
-- **Highest-leverage next move**: sized to closing the next gate, not adding a category point
+- **Highest-leverage next move**: ranked output (see format above)
 - **Code Health modifier applied**: ± n with reasoning
 - **Notable observations**: anything surprising
 
-For an at-a-glance summary in a database or table, use the compact format: `N/18, LX` (e.g., `15/18, L2`, `16/18, L1`).
+For an at-a-glance summary in a database or table, use the compact format: `N/18, LX` or `N.5/18, LX` (e.g., `15/18, L2`, `16.5/18, L1`).
 
 Keep output to a single page where possible. This is fast triage, not a deep audit.
 
@@ -233,3 +295,4 @@ For monorepos > 500MB / > 2,000 files, even a substantive root CLAUDE.md is ofte
 - CodeScene — code health predicts AI effectiveness (defect risk +60% on unhealthy code)
 - GitClear — AI doubles code duplication, halves refactoring across 211M lines
 - Anthropic Code Review pattern — multi-agent cross-verification (94% detection vs 45% LLM-only)
+- Provider Portal Core's `maturity-gap.md` — repo-tailored variant with closed-loop execution; inspired v4's parallel-subagent dispatch, half-points, and effort tiebreaker
