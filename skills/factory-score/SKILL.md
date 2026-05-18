@@ -1,7 +1,7 @@
 ---
 name: factory-score
 description: Score a repository against the "Software Factory" maturity rubric — measures how ready a repo is for AI-driven development. Produces both a 0–18 Score (with half-points) and a gated 0–3 Level (the two can disagree; level wins for agentic-readiness decisions). Use when triaging repos, prioritizing AI-readiness investment, or checking whether a codebase is amenable to autonomous agent workflows.
-version: 0.4.0-wip
+version: 0.5.0-wip
 ---
 
 > ⚠️ **WORK IN PROGRESS — NOT YET VETTED**
@@ -10,7 +10,8 @@ version: 0.4.0-wip
 > - **v1** counted *presence* of artifacts (over-scored large monorepos)
 > - **v2** added coverage adjustment for scale + code-health + CI-speed modifiers
 > - **v3** added **gated Levels** because the additive score doesn't capture agentic-readiness on its own — a repo can score 16/18 and still be Level 1 if the points are distributed wrong
-> - **v4** (current) added **half-point scores**, **parallel-subagent dispatch** for assessment, and a **formalized effort tiebreaker** for the recommended next move. Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
+> - **v4** added **half-point scores**, **parallel-subagent dispatch** for assessment, and a **formalized effort tiebreaker** for the recommended next move
+> - **v5** (current) added a **read-only repo state check** that aborts if the repo isn't on the default branch with a clean working tree. Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
 >
 > Known limitations: infrastructure repos (Terraform, build-images), generated code, editor extensions, training content, and CI-only tooling all fit awkwardly into this rubric and may need separate variants. Branch-protection detection assumes GitHub rulesets and may underreport on classic protections. Some gates (especially G11, the auto-feedback loop) are hard to detect without runtime observation. Treat output as a starting point for conversation, not a final assessment.
 
@@ -38,6 +39,30 @@ Every signal is a file existence check, file-size/age check, CI config key, grep
 ```
 
 Output saved to `~/factory-score/<repo>-YYYY-MM-DD.md`.
+
+---
+
+## Step -1: Repo state check (run before everything else)
+
+The skill assesses **the canonical state of the repo**, not whatever your local workspace happens to look like. Before scoring, verify the repo is on the default branch with a clean working tree. **Read-only — never modifies your state.**
+
+If the repo was passed as a GitHub URL and freshly cloned to `/tmp/factory-score-<repo>`, this step is a no-op (the fresh clone is already on the default branch with no local changes).
+
+For local paths (including current dir):
+
+1. **Detect the default branch.** Try `gh api repos/<owner>/<repo> --jq .default_branch` if origin is a GitHub remote. Fall back to `git symbolic-ref refs/remotes/origin/HEAD --short` and strip the `origin/` prefix. If neither works, ask the user.
+2. **Verify HEAD matches the default branch.** `git branch --show-current` must equal the default branch.
+   - If not: **abort** with `"Assessment must run on the default branch (<X>). You're on <Y>. Switch branches or pass a GitHub URL instead."`
+3. **Verify a clean working tree.** `git status --porcelain` must be empty.
+   - If not: **abort** with `"Uncommitted changes detected. Commit or stash before scoring (or pass a GitHub URL to score the remote state)."`
+4. **Warn if local is behind origin (don't abort).** `git fetch origin <default> 2>/dev/null && git rev-list --count HEAD..origin/<default>`.
+   - If > 0: print `"⚠️ Local <default> is N commits behind origin. Score will reflect your local state, not the latest remote."`
+
+Only if checks 2 and 3 pass, proceed to Step 0.
+
+**Why read-only:** earlier drafts auto-stashed and switched branches. That works for repo-internal skills (where the workflow is "always run on develop"), but for a portable skill it's too invasive — the stash/pop cycle has too many failure modes (merge conflicts on pop, untracked files, detached HEAD, submodules). Refusing to run on a dirty/wrong-branch repo is louder, safer, and teaches the user to put state in order first.
+
+**Override flag (optional):** if the user passes `--allow-dirty` or `--allow-non-default-branch`, skip the corresponding check. Useful for ad-hoc exploration but the resulting score should be marked `(unreliable: dirty tree)` or `(unreliable: feature branch)` in the output header.
 
 ---
 
@@ -252,13 +277,14 @@ After the scorecard + gate analysis, recommend the **single highest-leverage nex
 ## Process (full sequence)
 
 1. **Resolve target repo** (current dir, local path, or GitHub URL → clone to `/tmp/factory-score-<repo>`)
-2. **Step 0:** Compute Repo Scale preamble (file count, size, modules, code health, CI duration)
-3. **Dispatch 6 parallel subagents** (one per category) with `Agent` tool, `subagent_type: "Explore"`. Each returns Score (0–3 with half-points) + Evidence + Gaps. Each subagent should exclude these paths: `node_modules`, `.git`, `target`, `dist`, `build`, `.next`, `.fastembed_cache`, `bin`, `obj`
-4. **Collect all 6 reports** and sum to raw total
-5. **Apply Code Health modifier**
-6. **Evaluate gates** in order (L0→L1 → L1→L2 → L2→L3); stop at first failed gate to determine Level
-7. **Rank gaps** by category priority + gate-over-half-point + effort tiebreaker
-8. **Output** the scorecard + level analysis + highest-leverage next move
+2. **Step -1:** Repo state check — abort if not on default branch or working tree is dirty (skip if fresh clone)
+3. **Step 0:** Compute Repo Scale preamble (file count, size, modules, code health, CI duration)
+4. **Dispatch 6 parallel subagents** (one per category) with `Agent` tool, `subagent_type: "Explore"`. Each returns Score (0–3 with half-points) + Evidence + Gaps. Each subagent should exclude these paths: `node_modules`, `.git`, `target`, `dist`, `build`, `.next`, `.fastembed_cache`, `bin`, `obj`
+5. **Collect all 6 reports** and sum to raw total
+6. **Apply Code Health modifier**
+7. **Evaluate gates** in order (L0→L1 → L1→L2 → L2→L3); stop at first failed gate to determine Level
+8. **Rank gaps** by category priority + gate-over-half-point + effort tiebreaker
+9. **Output** the scorecard + level analysis + highest-leverage next move
 
 ## Output format
 
