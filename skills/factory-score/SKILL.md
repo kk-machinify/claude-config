@@ -1,7 +1,7 @@
 ---
 name: factory-score
 description: Score a repository against the "Software Factory" maturity rubric — measures how ready a repo is for AI-driven development. Produces both a 0–18 Score (with half-points) and a gated 0–3 Level (the two can disagree; level wins for agentic-readiness decisions). Use when triaging repos, prioritizing AI-readiness investment, or checking whether a codebase is amenable to autonomous agent workflows.
-version: 0.5.0-wip
+version: 0.6.0-wip
 ---
 
 > ⚠️ **WORK IN PROGRESS — NOT YET VETTED**
@@ -11,7 +11,8 @@ version: 0.5.0-wip
 > - **v2** added coverage adjustment for scale + code-health + CI-speed modifiers
 > - **v3** added **gated Levels** because the additive score doesn't capture agentic-readiness on its own — a repo can score 16/18 and still be Level 1 if the points are distributed wrong
 > - **v4** added **half-point scores**, **parallel-subagent dispatch** for assessment, and a **formalized effort tiebreaker** for the recommended next move
-> - **v5** (current) added a **read-only repo state check** that aborts if the repo isn't on the default branch with a clean working tree. Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
+> - **v5** added a **read-only repo state check** that aborts if the repo isn't on the default branch with a clean working tree
+> - **v6** (current) added **ADR / decision-log quality checks** — counting `docs/adr/` files isn't enough; v6 verifies structure, code-anchoring, cross-linking, and (critically) that the ADRs aren't byte-identical clones from another repo. Caught one real case (s3-castore had 28 ADRs that were verbatim copies of Pika's). Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
 >
 > Known limitations: infrastructure repos (Terraform, build-images), generated code, editor extensions, training content, and CI-only tooling all fit awkwardly into this rubric and may need separate variants. Branch-protection detection assumes GitHub rulesets and may underreport on classic protections. Some gates (especially G11, the auto-feedback loop) are hard to detect without runtime observation. Treat output as a starting point for conversation, not a final assessment.
 
@@ -187,6 +188,45 @@ A category scores X.5 when **most but not all** next-level criteria are met. Exa
 | 1 | CI runs tests on PR |
 | 2 | + agent-runnable entrypoints (`make ci`, `make test`, `make lint`, or `package.json` scripts, or `justfile`) + bot/PR integrations (Renovate, Dependabot, custom PR bots) |
 | 3 | + cron-triggered or event-triggered cloud agents (GitHub Action invoking Claude/Anthropic API/Bedrock) + ticket→PR pipeline + scheduled entropy/sweeper agent |
+
+---
+
+## ADR / decision-log quality check (apply where ADRs are credited)
+
+Counting files in `docs/adr/` or `docs/adrs/` is *not* enough — outdated, generic, or borrowed-from-another-repo ADRs are worse than no ADRs ("outdated context is worse than no context"). When ADRs are claimed for **Context Engineering Score ≥ 2** or **Knowledge Persistence Score ≥ 2**, run these mechanical quality checks. ADRs that fail multiple checks **don't count toward the score** for the category that's crediting them.
+
+### Per-ADR structural checks
+
+For each `*.md` file in `docs/adr/` or `docs/adrs/` (excluding `README.md` and `template.md`):
+
+| Signal | How to check |
+|--------|--------------|
+| **Has structure** | Contains all of: `Status`, `Context` (or `Context and Problem Statement`), `Decision` (or `Decision Outcome`), `Consequences`. Grep for these section headers. |
+| **Status is real** | `grep '^[*]*Status[*]*:' <adr>` returns a non-empty value (`Accepted`, `Superseded by X`, `Deprecated`, `Proposed`, etc.) |
+| **Anchored to this repo's code** | `grep -E '<this-repo-name>/\|src/\|crates/\|apps/\|packages/\|\.cs\|\.rs\|\.py\|\.ts' <adr>` returns ≥1 hit referencing paths that exist in *this* repo |
+| **Considers alternatives** | Contains `Considered Options`, `Alternatives`, or similar section listing ≥2 options |
+| **Documents consequences both ways** | The Consequences section has both positive items AND tradeoffs/bad items (grep for `Bad:` `Tradeoff:` `Cons:` or similar) |
+
+### Cross-cutting checks (across the ADR set)
+
+| Signal | How to check |
+|--------|--------------|
+| **Status diversity** | Not 100% `Status: Accepted`. At least one ADR has `Superseded` / `Deprecated` / `Supersedes` / `Replaced by` — indicates the log is alive |
+| **Cross-linking** | `grep -lE 'ADR [0-9]+\|0[0-9]{3}-' docs/adr*/*.md` returns ≥30% of ADRs |
+| **Referenced from CLAUDE.md** | `grep -lE 'adr\|decision-log\|docs/adr' CLAUDE.md AGENTS.md .claude/docs/*.md` returns at least one match |
+| **No cross-repo duplication** | For each ADR in this repo, check sibling repos in the same org for byte-identical files: `diff -r docs/adrs/ <sibling-repo>/docs/adrs/`. If ≥50% of ADRs are byte-identical to another repo's, **flag as borrowed** — the score for ADRs in this repo should be set to 0 unless the team has explicitly designated this as a shared-decisions pattern |
+
+### Scoring impact
+
+Compute `adr_quality_pct = mean across ADRs of (structural checks passed) / 5` and check the cross-cutting signals separately.
+
+| Outcome | Effect on score |
+|---------|-----------------|
+| ≥80% structural + cross-cutting checks all pass | ADRs count fully toward Context Engineering and Knowledge Persistence |
+| 50–79% structural OR 1 cross-cutting signal fails | ADRs count at half-weight — round category score down by 0.5 |
+| <50% structural OR cross-repo duplication detected | ADRs **don't count** — score the category as if `docs/adr*/` didn't exist |
+
+**Real case caught by v6 (2026-05-18):** s3-castore had 28 files in `docs/adrs/` byte-identical to Pika's. The structural checks would have passed (because the structure is Pika's — and Pika's is excellent) but the cross-repo-duplication check fails decisively. With v5, s3-castore scored Knowledge Persistence 2.5; with v6, it scores 1.5 (CHANGELOG only, ADRs excluded). The repo was subsequently marked `N/A: Superseded by Pika` in the org's tracking database.
 
 ---
 
