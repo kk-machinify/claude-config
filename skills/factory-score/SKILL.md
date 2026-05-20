@@ -1,7 +1,7 @@
 ---
 name: factory-score
 description: Score a repository against the "Software Factory" maturity rubric — measures how ready a repo is for AI-driven development. Produces both a 0–18 Score (with half-points) and a gated 0–3 Level (the two can disagree; level wins for agentic-readiness decisions). Use when triaging repos, prioritizing AI-readiness investment, or checking whether a codebase is amenable to autonomous agent workflows.
-version: 0.6.0-wip
+version: 0.7.0-wip
 ---
 
 > ⚠️ **WORK IN PROGRESS — NOT YET VETTED**
@@ -12,7 +12,8 @@ version: 0.6.0-wip
 > - **v3** added **gated Levels** because the additive score doesn't capture agentic-readiness on its own — a repo can score 16/18 and still be Level 1 if the points are distributed wrong
 > - **v4** added **half-point scores**, **parallel-subagent dispatch** for assessment, and a **formalized effort tiebreaker** for the recommended next move
 > - **v5** added a **read-only repo state check** that aborts if the repo isn't on the default branch with a clean working tree
-> - **v6** (current) added **ADR / decision-log quality checks** — counting `docs/adr/` files isn't enough; v6 verifies structure, code-anchoring, cross-linking, and (critically) that the ADRs aren't byte-identical clones from another repo. Caught one real case (s3-castore had 28 ADRs that were verbatim copies of Pika's). Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
+> - **v6** added **ADR / decision-log quality checks** — counting `docs/adr/` files isn't enough; v6 verifies structure, code-anchoring, cross-linking, and (critically) that the ADRs aren't byte-identical clones from another repo. Caught one real case (s3-castore had 28 ADRs that were verbatim copies of Pika's)
+> - **v7** (current) tightened **G9's "merge-blocking Claude review"** check — a `claude-pr-review.yml` that just posts comments is **advisory**, not blocking. v7 requires both (a) the workflow exits non-zero when Claude flags blocking concerns AND (b) the workflow's status check is required by branch protection. Inspired by [StrongDM's framework](https://www.strongdm.com/blog/the-strongdm-software-factory-building-software-with-ai) where "humans don't review code" is the endpoint — that bar requires actually-gating reviewers, not advisory ones. Closed-loop execution (propose → fix → re-assess) is intentionally NOT included yet — this skill assesses only.
 >
 > Known limitations: infrastructure repos (Terraform, build-images), generated code, editor extensions, training content, and CI-only tooling all fit awkwardly into this rubric and may need separate variants. Branch-protection detection assumes GitHub rulesets and may underreport on classic protections. Some gates (especially G11, the auto-feedback loop) are hard to detect without runtime observation. Treat output as a starting point for conversation, not a final assessment.
 
@@ -275,7 +276,16 @@ All 6 Level 2 gates PLUS all 5 below:
 |------|-------|-----------------|
 | **G7: Event-triggered cloud Claude** | Workflow with `on: pull_request` invoking Claude/Anthropic API/Bedrock, with `pull-requests: write` permission | PR review without waiting on a human |
 | **G8: Cron-triggered cloud agent** | Workflow with `schedule:` cron trigger that runs a Claude/automation job (sweeper, knowledge curator, type-audit) | Factory maintains itself |
-| **G9: Quality verification beyond "tests pass"** | At least one of: mutation testing in CI, property-based tests for invariants, or merge-blocking Claude review (not advisory-only) | Catches AI's self-correction blind spot |
+| **G9: Quality verification beyond "tests pass"** | At least one of: (a) mutation testing config with CI score gate (Stryker / `cargo-mutants` / mutmut / PIT), (b) property-based tests for invariants (`proptest` / `hypothesis` / `fast-check`), or (c) **merge-blocking** Claude review — see verification below | Catches AI's self-correction blind spot (64.5% per Anthropic research) |
+
+**Verifying "merge-blocking" Claude review (v7).** A `claude-pr-review.yml` workflow that posts review comments is **advisory** — Claude's findings *suggest* but don't *gate* the merge. To count for G9, both of the following must hold:
+
+1. **The workflow exits non-zero when Claude flags blocking concerns.** Check: grep the workflow for `exit 1`, `core.setFailed`, `:: error ::`, `--fail-on-error`, or equivalent gating logic in the Claude review step. A workflow that only calls `gh pr review --comment` is advisory.
+2. **The workflow's status check is required by branch protection.** Check: `gh api repos/<owner>/<repo>/branches/<default>/protection/required_status_checks --jq '.contexts'` (or the rulesets equivalent) must include the workflow's check name. Without this, a passing/failing Claude review doesn't gate merge.
+
+**Default behavior of every `claude-pr-review.yml` in the org as of 2026-05-18 is advisory** — they post comments but don't `exit 1` and aren't wired into branch protection. This is consistent with how cob-assistant, prompt-hub, drgrouper, document_processing_pipeline, mac-ui-presentation, and onlineDataAnalysis use the pattern. They satisfy **G6** (an adversarial reviewer exists — the L1→L2 gate) but **do not satisfy G9** (quality verification beyond tests — an L2→L3 gate).
+
+The two gates were always distinct but I was implicitly conflating them. v7 makes the distinction explicit: G6 needs *any* adversarial reviewer (advisory is fine); G9 needs *merge-blocking* verification (advisory is not enough). For a repo to reach L3, the Claude reviewer has to actually be able to refuse to merge.
 | **G10: Self-curating knowledge** | Scheduled job updates docs/lessons/knowledge automatically from PRs/incidents (not just deploys) | No human-bottlenecked knowledge debt |
 | **G11: Feedback loop into agent execution** | Evidence of self-iteration: test fails → agent fixes → re-runs without human prompt | The agentic-pipeline gate — automation vs autonomy |
 
